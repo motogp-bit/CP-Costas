@@ -1,29 +1,54 @@
 import math
+import time
 from ortools.sat.python import cp_model
+
+def add_lex_less_or_equal(model, arr1, arr2, name_prefix="lex"):
+    n = len(arr1)
+    is_eq_prefix = model.NewBoolVar(f'{name_prefix}_eq_0')
+    model.Add(is_eq_prefix == 1)
+    
+    for i in range(n):
+        model.Add(arr1[i] <= arr2[i]).OnlyEnforceIf(is_eq_prefix)
+        
+        if i < n - 1:
+            next_eq = model.NewBoolVar(f'{name_prefix}_eq_{i+1}')
+            curr_eq = model.NewBoolVar(f'{name_prefix}_match_{i}')
+            
+            model.Add(arr1[i] == arr2[i]).OnlyEnforceIf(curr_eq)
+            model.Add(arr1[i] != arr2[i]).OnlyEnforceIf(curr_eq.Not())
+            
+            model.AddBoolAnd([is_eq_prefix, curr_eq]).OnlyEnforceIf(next_eq)
+            model.AddBoolOr([is_eq_prefix.Not(), curr_eq.Not()]).OnlyEnforceIf(next_eq.Not())
+            
+            is_eq_prefix = next_eq
 
 def solve_array_configuration():
     model = cp_model.CpModel()
-    n = 32
+    n = 20
 
     A = {}
     for i in range(1, n + 1):
         A[i] = model.NewIntVar(1, n, f'A_{i}')
     
     model.AddAllDifferent(list(A.values()))
+
+    A_list = [A[i] for i in range(1, n + 1)]
+
+    A_rev = [A[n + 1 - i] for i in range(1, n + 1)]
+    add_lex_less_or_equal(model, A_list, A_rev, name_prefix="gen_rev")
+    A_comp = [n + 1 - A[i] for i in range(1, n + 1)]
+    add_lex_less_or_equal(model, A_list, A_comp, name_prefix="gen_comp")
+
     T = {}
     for w in range(1, n):
         for j in range(1, n - w + 1):
             domain = cp_model.Domain.FromIntervals([[-n + 1, -1], [1, n - 1]])
             T[(w, j)] = model.NewIntVarFromDomain(domain, f'T_{w}_{j}')
-            
             model.Add(T[(w, j)] == A[j + w] - A[j])
 
     max_w = math.floor((n - 1) / 2)
     for j in range(1, n + 1):
-        col_vars = []
-        for w in range(1, max_w + 1):
-            if (w, j) in T:
-                col_vars.append(T[(w, j)])
+        col_vars = [T[(w, j)] for w in range(1, max_w + 1) if (w, j) in T]
         if len(col_vars) > 1:
             model.AddAllDifferent(col_vars)
 
@@ -33,71 +58,48 @@ def solve_array_configuration():
             abs_T[(w, j)] = model.NewIntVar(1, n - 1, f'absT_{w}_{j}')
             model.AddAbsEquality(abs_T[(w, j)], T[(w, j)])
 
+    all_abs_vars = list(abs_T.values())
     for k in range(1, n):
-        k_indicators = []
-        for w in range(1, n):
-            for j in range(1, n - w + 1):
-                is_k = model.NewBoolVar(f'is_{k}_{w}_{j}')
-                model.Add(abs_T[(w, j)] == k).OnlyEnforceIf(is_k)
-                model.Add(abs_T[(w, j)] != k).OnlyEnforceIf(is_k.Not())
-                k_indicators.append(is_k)
+        k_indicators = [model.NewBoolVar(f'is_{k}_{idx}') for idx in range(len(all_abs_vars))]
+        for idx, var in enumerate(all_abs_vars):
+            model.Add(var == k).OnlyEnforceIf(k_indicators[idx])
+            model.Add(var != k).OnlyEnforceIf(k_indicators[idx].Not())
         model.Add(sum(k_indicators) == n - k)
 
     w_conditions = []
     for w in range(1, n):
+        row_vars = [T[(w, j)] for j in range(1, n - w + 1)]
+        
         has_1 = model.NewBoolVar(f'has_1_w{w}')
         has_m1 = model.NewBoolVar(f'has_m1_w{w}')
         has_2 = model.NewBoolVar(f'has_2_w{w}')
         has_m2 = model.NewBoolVar(f'has_m2_w{w}')
 
-        b_1 = []
-        b_m1 = []
-        b_2 = []
-        b_m2 = []
-        for j in range(1, n - w + 1):
-            b1 = model.NewBoolVar(f'b1_{w}_{j}')
-            model.Add(T[(w, j)] == 1).OnlyEnforceIf(b1)
-            model.Add(T[(w, j)] != 1).OnlyEnforceIf(b1.Not())
-            b_1.append(b1)
-
-            bm1 = model.NewBoolVar(f'bm1_{w}_{j}')
-            model.Add(T[(w, j)] == -1).OnlyEnforceIf(bm1)
-            model.Add(T[(w, j)] != -1).OnlyEnforceIf(bm1.Not())
-            b_m1.append(bm1)
-
-            b2 = model.NewBoolVar(f'b2_{w}_{j}')
-            model.Add(T[(w, j)] == 2).OnlyEnforceIf(b2)
-            model.Add(T[(w, j)] != 2).OnlyEnforceIf(b2.Not())
-            b_2.append(b2)
-
-            bm2 = model.NewBoolVar(f'bm2_{w}_{j}')
-            model.Add(T[(w, j)] == -2).OnlyEnforceIf(bm2)
-            model.Add(T[(w, j)] != -2).OnlyEnforceIf(bm2.Not())
-            b_m2.append(bm2)
-
-        model.AddMaxEquality(has_1, b_1)
-        model.AddMaxEquality(has_m1, b_m1)
-        model.AddMaxEquality(has_2, b_2)
-        model.AddMaxEquality(has_m2, b_m2)
+        for target, flag in [(1, has_1), (-1, has_m1), (2, has_2), (-2, has_m2)]:
+            match_flags = [model.NewBoolVar('') for _ in row_vars]
+            for rv, mf in zip(row_vars, match_flags):
+                model.Add(rv == target).OnlyEnforceIf(mf)
+                model.Add(rv != target).OnlyEnforceIf(mf.Not())
+            model.AddBoolOr(match_flags).OnlyEnforceIf(flag)
+            model.AddBoolAnd([mf.Not() for mf in match_flags]).OnlyEnforceIf(flag.Not())
 
         cond1 = model.NewBoolVar(f'cond1_w{w}')
-        model.AddMinEquality(cond1, [has_1, has_m1])
+        model.AddBoolAnd([has_1, has_m1]).OnlyEnforceIf(cond1)
 
         cond2 = model.NewBoolVar(f'cond2_w{w}')
-        model.AddMinEquality(cond2, [has_2, has_m2])
+        model.AddBoolAnd([has_2, has_m2]).OnlyEnforceIf(cond2)
 
         w_cond = model.NewBoolVar(f'w_cond_{w}')
-        model.AddMaxEquality(w_cond, [cond1, cond2])
+        model.AddBoolOr([cond1, cond2]).OnlyEnforceIf(w_cond)
         w_conditions.append(w_cond)
 
     model.AddBoolOr(w_conditions)
-
-    model.Add(T[(n - 3, 2)] == T[(n - 2, 1)] + T[(n - 2, 2)] - T[(n - 1, 1)])
 
     for w in range(1, n):
         model.AddAllDifferent([T[(w, j)] for j in range(1, n - w + 1)])
 
     solver = cp_model.CpSolver()
+    solver.parameters.num_search_workers = 8 
     status = solver.Solve(model)
 
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -108,4 +110,8 @@ def solve_array_configuration():
         print(f'No valid assignment exists.')
 
 if __name__ == '__main__':
+    start_time = time.time()
     solve_array_configuration()
+    end_time = time.time()
+    elapsed = end_time - start_time
+    print(f"Time: {elapsed:.2f} seconds")
