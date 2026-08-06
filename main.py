@@ -1,4 +1,3 @@
-import math
 import time
 from ortools.sat.python import cp_model
 
